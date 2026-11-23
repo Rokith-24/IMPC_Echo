@@ -1,20 +1,29 @@
 
-/*
- * ICMP Echo Reply Server
- *
- * Compile: gcc icmp_reply.c -o icmp_reply
- * Run:     sudo ./icmp_reply
- */
-
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
-#include <stdint.h>
 
+/* Write timestamped messages to the log file */
+void log_event(FILE *log, const char *message)
+{
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    char timestamp[30];
+
+    strftime(timestamp, sizeof(timestamp),
+             "%Y-%m-%d %H:%M:%S", local);
+
+    fprintf(log, "[%s] %s\n", timestamp, message);
+    fflush(log);
+}
+
+/* Calculate ICMP checksum */
 unsigned short checksum(void *data, int len)
 {
     unsigned short *ptr = data;
@@ -38,17 +47,34 @@ unsigned short checksum(void *data, int len)
 int main()
 {
     int sockfd;
+    char message[256];
 
+    /* Open server log file */
+    FILE *log = fopen("server.log", "a");
+
+    if (log == NULL)
+    {
+        perror("Unable to open server.log");
+        return 1;
+    }
+
+    log_event(log, "Server Started");
+
+    /* Create raw ICMP socket */
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
 
     if (sockfd < 0)
     {
         perror("Socket creation failed");
+        log_event(log, "ERROR: Socket creation failed");
+        fclose(log);
         return 1;
     }
 
-    printf("ICMP Reply Server Started\n");
+    printf("ICMP Server Started\n");
     printf("Waiting for Echo Requests...\n");
+
+    log_event(log, "Raw ICMP Socket Created Successfully");
 
     while (1)
     {
@@ -67,6 +93,7 @@ int main()
         if (bytes < 0)
         {
             perror("recvfrom");
+            log_event(log, "ERROR: Failed to receive packet");
             continue;
         }
 
@@ -95,24 +122,31 @@ int main()
             (struct icmphdr *)
             ((unsigned char *)buffer + ip_header_len);
 
-        if (icmp->type == ICMP_ECHO &&
-            icmp->code == 0)
+        /* Check whether packet is an Echo Request */
+        if (icmp->type == ICMP_ECHO && icmp->code == 0)
         {
-            printf("\nEcho Request Received\n");
+            const char *source_ip = inet_ntoa(src_addr.sin_addr);
 
-            printf("From: %s\n",
-                   inet_ntoa(src_addr.sin_addr));
+            printf("\nEcho Request Received from %s\n",
+                   source_ip);
 
-            /* Build Echo Reply */
+            snprintf(message, sizeof(message),
+                     "Echo Request Received from %s",
+                     source_ip);
+            log_event(log, message);
 
+            snprintf(message, sizeof(message),
+                     "ICMP Type: %d, Code: %d",
+                     icmp->type, icmp->code);
+            log_event(log, message);
+
+            /* Convert Echo Request into Echo Reply */
             icmp->type = ICMP_ECHOREPLY;
             icmp->checksum = 0;
 
-            icmp->checksum =
-                checksum(icmp, icmp_len);
+            icmp->checksum = checksum(icmp, icmp_len);
 
             /* Send Echo Reply */
-
             if (sendto(sockfd,
                        icmp,
                        icmp_len,
@@ -121,15 +155,26 @@ int main()
                        addr_len) < 0)
             {
                 perror("sendto");
+
+                snprintf(message, sizeof(message),
+                         "ERROR: Failed to send Echo Reply to %s",
+                         source_ip);
+                log_event(log, message);
             }
             else
             {
                 printf("Echo Reply Sent Successfully\n");
+
+                snprintf(message, sizeof(message),
+                         "Echo Reply Sent Successfully to %s",
+                         source_ip);
+                log_event(log, message);
             }
         }
     }
 
     close(sockfd);
+    fclose(log);
 
     return 0;
 }
